@@ -19,3 +19,8 @@ uuid = {version = "0.3", features = ["v4"]}
 
 [dev-dependencies]
 crossbeam = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = "*"
+user32-sys = "*"
+kernel32-sys = "*"

@@ -1,0 +1,40 @@
+
+
+
+
+----------------------
+
+shared memory --
+
+creating:
+
+CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READONLY || PAGE_READWRITE, 0, (DWORD) size, name ? namestr : NULL);
+
+may return ERROR_ALREADY_EXISTS via GetLastError(), can check if we want to open existing
+
+opening:
+
+mapped_file_ = OpenFileMapping(FILE_MAP_READ || FILE_MAP_ALL_ACCESS, false, name ? namestr : NULL);
+// what does this do if name == NULL?! there's no handle passed
+
+mapping:
+
+// offset is one of the 0s
+memptr = MapViewOffile(mapped_file_, FILE_MAP_READ || FILE_MAP_ALL_ACCESS, 0, 0, size);
+
+unmap:
+
+UnampViewOffile(memptr)
+
+sharing across a process -- in any process, as long as you have the sourceProcess and sourceHandle:
+
+HANDLE aSourceHandle, aTargetHandle;
+DuplicateHandle(sourceProcessHandle, aSourceHandle,
+                targetProcessHandle, &aTargetHandle,
+		STANDARD_RIGHTS_REQUIRED | (FILE_MAP_READ || FILE_MAP_ALL_ACCESS),
+		FALSE, 0)
+
+then send targetHandle to targetProcessHandle.
+
+
+

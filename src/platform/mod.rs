@@ -14,7 +14,10 @@ mod os {
     #[cfg(all(not(feature = "force-inprocess"), target_os = "macos"))]
     include!("macos/mod.rs");
 
-    #[cfg(any(feature = "force-inprocess", target_os = "windows", target_os = "android"))]
+    #[cfg(all(not(feature = "force-inprocess"), target_os = "windows"))]
+    include!("windows/mod.rs");
+
+    #[cfg(any(feature = "force-inprocess", target_os = "android"))]
     include!("inprocess/mod.rs");
 }
 

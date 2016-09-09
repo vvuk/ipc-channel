@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::thread;
 use mio::unix::EventedFd;
 use mio::{Poll, Token, Events, Ready, PollOpt};
+use super::Incrementor;
 
 const MAX_FDS_IN_CMSG: u32 = 64;
 

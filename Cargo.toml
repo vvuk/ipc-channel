@@ -9,6 +9,7 @@ repository = "https://github.com/servo/ipc-channel"
 [features]
 force-inprocess = []
 unstable = []
+win32-trace = []
 
 [dependencies]
 bincode = "0.6"
@@ -24,3 +25,7 @@ mio = "0.6.1"
 
 [dev-dependencies]
 crossbeam = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = "0.2"
+kernel32-sys = "0.2"

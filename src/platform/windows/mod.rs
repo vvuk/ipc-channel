@@ -52,11 +52,13 @@ const MAGIC_NO_OUTSTANDING_DATA_CODE: u32 = MAGIC_CODE_BASE + 0;
 const MAGIC_CHANNEL_CLOSED_CODE: u32 = MAGIC_CODE_BASE + 1;
 
 // When we create the pipe, how big of a write buffer do we specify?
-// This is reserved in the nonpaged pool.
-//
-// This is 80k because a lot of the test assume that we can write a
-// 64k buffer without fragmentation.  This is unfortunate.
-const WRITE_BUFFER_SIZE: usize = 80 * 1024; // 64k+16k
+// This is reserved in the nonpaged pool.  The fragment size is the
+// max we can write to the pipe without fragmentation, and the
+// buffer size is what we tell the pipe it is, so we have room
+// for out of band data etc.  We can probably do way less than
+// 16k extra.
+const MAX_FRAGMENT_SIZE: usize = 64 * 1024;
+const WRITE_BUFFER_SIZE: usize = MAX_FRAGMENT_SIZE + 16*1024;
 
 // When we read, how big of a heap buffer do we allocate?
 const READ_BUFFER_SIZE: usize = 128 * 1024; //128k;
@@ -832,6 +834,10 @@ unsafe fn write_buf(handle: HANDLE, bytes: &[u8]) -> Result<(),WinError> {
 impl OsIpcSender {
     pub fn connect(name: String) -> Result<OsIpcSender,WinError> {
         OsIpcSender::connect_pipe_id(Uuid::parse_str(&name).unwrap())
+    }
+
+    pub fn get_max_fragment_size() -> usize {
+        MAX_FRAGMENT_SIZE
     }
 
     fn from_handle(handle: HANDLE) -> OsIpcSender {

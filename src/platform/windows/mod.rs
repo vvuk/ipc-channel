@@ -1081,7 +1081,7 @@ impl OsIpcReceiverSet {
                 // XXX use GetQueuedCompletionStatusEx to dequeue multiple CP at once!
                 let ok = kernel32::GetQueuedCompletionStatus(*self.iocp,
                                                              &mut nbytes,
-                                                             &mut completion_key as *mut _ as *mut u64,
+                                                             &mut completion_key as *mut _ as *mut winapi::ULONG_PTR,
                                                              &mut ov_ptr,
                                                              winapi::INFINITE);
                 dd!("[# {:?}] GetQueuedCS -> ok:{} nbytes:{} key:{:?}", *self.iocp, ok, nbytes, completion_key);
@@ -1226,10 +1226,14 @@ impl Deref for OsIpcSharedMemory {
 }
 
 impl OsIpcSharedMemory {
+    #[allow(exceeding_bitshifts)]
     fn new(length: usize) -> Result<OsIpcSharedMemory,WinError> {
         unsafe {
-            let lhigh = (length >> 32) as u32;
-            let llow = (length & 0xffffffffusize) as u32;
+            let (lhigh, llow) = if cfg!(target_pointer_width = "64") {
+                ((length >> 32) as u32, (length & 0xffffffffusize) as u32)
+            } else {
+                (0, length as u32)
+            };
             let handle =
                 kernel32::CreateFileMappingA(INVALID_HANDLE_VALUE,
                                              ptr::null_mut(),

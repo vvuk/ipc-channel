@@ -31,15 +31,10 @@ use winapi;
 use winapi::{HANDLE, INVALID_HANDLE_VALUE, LPVOID};
 use kernel32;
 
+// some debug bump macros to better track what's going on in case of errors
 lazy_static! {
-    static ref DD_ENABLED: bool = match env::var_os("DD") {
-        Some(_) => true,
-        None => false,
-    };
-    static ref DD2_ENABLED: bool = match env::var_os("DD2") {
-        Some(_) => true,
-        None => false,
-    };
+    static ref DD_ENABLED: bool = env::var_os("IPC_CHANNEL_WIN_DEBUG_DUMP").is_some();
+    static ref DD2_ENABLED: bool = env::var_os("IPC_CHANNEL_WIN_DEBUG_MORE_DUMP").is_some();
 }
 
 macro_rules! dd { ($($rest:tt)*) => { if *DD_ENABLED { println!($($rest)*); } } }
@@ -108,8 +103,8 @@ impl OsIpcOutOfBandMessage {
     }
 
     fn needs_to_be_sent(&self) -> bool {
-        self.channel_handles.len() > 0 ||
-        self.shmem_handles.len() > 0 ||
+        !self.channel_handles.is_empty() ||
+        !self.shmem_handles.is_empty() ||
         self.big_data_receiver_handle != 0
     }
 
@@ -374,7 +369,8 @@ impl MessageReader {
 
         // if the remote end closed...
         if err != winapi::ERROR_SUCCESS {
-            panic!("[$ {:?}:{:?}] *** notify_completion: need to handle error! {}", self.iocp, self.handle, err);
+            // This should never happen
+            panic!("[$ {:?}:{:?}] *** notify_completion: unhandled error reported! {}", self.iocp, self.handle, err);
         }
 
         unsafe {
@@ -395,17 +391,18 @@ impl MessageReader {
         }
 
         dd2!("[$ {:?}:{:?}] start_read ov {:?}", self.iocp, self.handle, self.ov_ptr());
-        let mut bytes_read: u32 = 0;
 
-        // if the buffer is full, add more space
         let buf_len = self.read_buf.len();
         let mut buf_cap = self.read_buf.capacity();
+        let mut bytes_read: u32 = 0;
+
+        // if the buffer is full, add more capacity
         if buf_cap == buf_len {
-            let more =
-                if buf_cap == 0 { READ_BUFFER_SIZE }
-            else if buf_cap < READ_BUFFER_MAX_GROWTH { buf_cap }
-            else { READ_BUFFER_MAX_GROWTH };
-            self.read_buf.reserve(more);
+            self.read_buf.reserve(match buf_cap {
+                0 => READ_BUFFER_SIZE,
+                1...READ_BUFFER_MAX_GROWTH => buf_cap,
+                _ => READ_BUFFER_MAX_GROWTH
+            });
             buf_cap = self.read_buf.capacity();
         }
 
@@ -463,8 +460,8 @@ impl MessageReader {
 
     // Err(false) -> something really failed
     // Err(true) -> no message
-    // XXX This is dumb, we should return
-    //   Result<Option<(...)>,WinError>
+    // FIXME This is dumb, we should probably make this return Result<Option<(...)>,WinError>
+    // so that we can pass through the error that's lost in map_err below
     fn get_message(&mut self) -> Result<(Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>),bool> {
         let message_lengths = self.message_length();
         if message_lengths.is_none() {
@@ -476,7 +473,6 @@ impl MessageReader {
 
         // remove this message's bytes from read_buf, or just take read_buf
         // if it contains exactly one message
-        //dd!("[$ {:?}:{:?}] rb {:?}", self.iocp, self.handle, self.read_buf);
         let msg_buf = if self.read_buf.len() == bytes_needed {
             mem::replace(&mut self.read_buf, Vec::with_capacity(READ_BUFFER_SIZE))
         } else {
@@ -515,7 +511,6 @@ impl MessageReader {
 
         dd!("[$ {:?}:{:?}] get_message success -> {} bytes, {} channels, {} shmems",
             self.iocp, self.handle, buf_data.len(), channels.len(), shmems.len());
-        //dd!("[$ {:?}:{:?}] bd {:?}", self.iocp, self.handle, buf_data);
         Ok((buf_data, channels, shmems))
     }
 }
@@ -621,7 +616,7 @@ impl OsIpcReceiver {
         // cancel any outstanding IO request
         reader.cancel_io();
         // this is only okay if we have nothing in the read buf
-        Ok(reader.read_buf.len() == 0)
+        Ok(reader.read_buf.is_empty())
     }
 
     pub fn consume(&self) -> OsIpcReceiver {
@@ -719,7 +714,7 @@ impl OsIpcReceiver {
                                                        iocp,
                                                        *self.handle as winapi::ULONG_PTR,
                                                        0);
-            if ret == ptr::null_mut() {
+            if ret.is_null() {
                 return Err(WinError::last("CreateIoCompletionPort"));
             }
 
@@ -811,7 +806,6 @@ unsafe fn write_buf(handle: HANDLE, bytes: &[u8]) -> Result<(),WinError> {
         return Ok(());
     }
     let mut nwritten: u32 = 0;
-    //dd!("[c {:?}] writing: {:?}", handle, bytes);
     while nwritten < ntowrite {
         let mut nwrote: u32 = 0;
         if kernel32::WriteFile(handle,
@@ -825,7 +819,7 @@ unsafe fn write_buf(handle: HANDLE, bytes: &[u8]) -> Result<(),WinError> {
         }
         nwritten += nwrote;
         ntowrite -= nwrote;
-        //dd!("[c {:?}] ... wrote {} bytes, total {}/{} err {}", handle, nwrote, nwritten, bytes.len(), GetLastError());
+        dd2!("[c {:?}] ... wrote {} bytes, total {}/{} err {}", handle, nwrote, nwritten, bytes.len(), GetLastError());
     }
 
     Ok(())
@@ -880,7 +874,7 @@ impl OsIpcSender {
             let raw_handle = kernel32::OpenProcess(winapi::PROCESS_DUP_HANDLE,
                                                    winapi::FALSE,
                                                    server_pid as winapi::DWORD);
-            if raw_handle == ptr::null_mut() {
+            if raw_handle.is_null() {
                 return Err(WinError::last("OpenProcess"));
             }
 
@@ -924,7 +918,7 @@ impl OsIpcSender {
         assert!(data.len() < INVALID_HEADER_DATA_SIZE as usize);
 
         let server_process_handle =
-            if ports.len() > 0 || shared_memory_regions.len() > 0 {
+            if !ports.is_empty() || !shared_memory_regions.is_empty() {
                 try!(self.get_pipe_server_process_handle())
             } else {
                 WinHandle::invalid()
@@ -1016,7 +1010,7 @@ impl OsIpcReceiverSet {
                                                         ptr::null_mut(),
                                                         0 as winapi::ULONG_PTR,
                                                         0);
-            if iocp == ptr::null_mut() {
+            if iocp.is_null() {
                 return Err(WinError::last("CreateIoCompletionPort"));
             }
 
@@ -1031,9 +1025,18 @@ impl OsIpcReceiverSet {
         // use this to identify the receiver
         let receiver_handle = *receiver.handle;
 
-        // XXX we'll need a mutex here... at least while we loop through
-        // receivers to find a matching handle when we get a IOCP
         try!(receiver.add_to_iocp(*self.iocp));
+
+        // FIXME we *may* need a mutex to protect self.receivers --
+        // one thread could be adding something to this Set while
+        // another is calling select(); the add() could cause the
+        // receivers array to reallocate while we're doing stuff with
+        // it in select().  That would mean an add() would block while
+        // a select() is blocking.
+        // 
+        // A better option would be to have a mutex around a
+        // self.receivers_to_add array, and have select drain those
+        // and append to self.receivers whenever it's called.
         self.receivers.push(receiver);
 
         dd!("[# {:?}] ReceiverSet add {:?}", *self.iocp, receiver_handle);
@@ -1042,7 +1045,7 @@ impl OsIpcReceiverSet {
     }
 
     pub fn select(&mut self) -> Result<Vec<OsIpcSelectionResult>,WinError> {
-        assert!(self.receivers.len() > 0, "selecting with no objects?");
+        assert!(!self.receivers.is_empty(), "selecting with no objects?");
         dd!("[# {:?}] select() with {} receivers", *self.iocp, self.receivers.len());
 
         unsafe {
@@ -1068,7 +1071,7 @@ impl OsIpcReceiverSet {
             });
 
             // if we had prematurely closed elements, just process them first
-            if selection_results.len() > 0 {
+            if !selection_results.is_empty() {
                 return Ok(selection_results);
             }
 
@@ -1091,7 +1094,7 @@ impl OsIpcReceiverSet {
                     // function call itself failed or timed out.
                     // Otherwise, the async IO operation failed, and
                     // we want to hand io_err to notify_completion below.
-                    if ov_ptr == ptr::null_mut() {
+                    if ov_ptr.is_null() {
                         return Err(WinError::last("GetQueuedCompletionStatus"));
                     }
 
@@ -1153,7 +1156,7 @@ impl OsIpcReceiverSet {
 
                 // if we didn't dequeue at least one complete message -- we need to loop through GetQueuedCS again;
                 // otherwise we're done.
-                if selection_results.len() > 0 {
+                if !selection_results.is_empty() {
                     break;
                 }
             }
@@ -1263,7 +1266,7 @@ impl OsIpcSharedMemory {
                                     winapi::FILE_MAP_ALL_ACCESS,
                                     0, 0, 0)
         };
-        if address == ptr::null_mut() {
+        if address.is_null() {
             return Err(WinError::last("MapViewOfFile"));
         }
 
@@ -1435,7 +1438,6 @@ impl From<WinError> for DeserializeError {
 
 impl From<WinError> for Error {
     fn from(mpsc_error: WinError) -> Error {
-        //Error::new(ErrorKind::Other, format!("Win channel error ({} from {})", mpsc_error.0, mpsc_error.1))
         Error::new(ErrorKind::Other, format!("Win channel error ({})", mpsc_error.0))
     }
 }

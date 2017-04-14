@@ -64,8 +64,14 @@ unsafe fn new_sockaddr_un(path: *const c_char) -> (sockaddr_un, usize) {
 lazy_static! {
     static ref SYSTEM_SENDBUF_SIZE: usize = {
         let (tx, _) = channel().expect("Failed to obtain a socket for checking maximum send size");
-        tx.get_system_sendbuf_size().expect("Failed to obtain maximum send size for socket")
+        let sz = tx.get_system_sendbuf_size().expect("Failed to obtain maximum send size for socket");
+        println!("SENDBUF size {}", sz);
+        sz
     };
+}
+
+fn gettid() -> i64 {
+    unsafe { libc::syscall(186 /* SYS_gettid */) }
 }
 
 // The pid of the current process which is used to create unique IDs
@@ -80,6 +86,7 @@ pub fn channel() -> Result<(OsIpcSender, OsIpcReceiver),UnixError> {
     let mut results = [0, 0];
     unsafe {
         if socketpair(libc::AF_UNIX, SOCK_SEQPACKET, 0, &mut results[0]) >= 0 {
+            println!("[t:{}] CHANNEL: sender fd {} receiver fd {}", gettid(), results[0], results[1]);
             Ok((OsIpcSender::from_fd(results[0]), OsIpcReceiver::from_fd(results[1])))
         } else {
             Err(UnixError::last())
@@ -102,6 +109,7 @@ impl Drop for OsIpcReceiver {
     fn drop(&mut self) {
         unsafe {
             if self.fd.get() >= 0 {
+                //println!("receiver drop fd {}", self.fd.get());
                 let result = libc::close(self.fd.get());
                 assert!(thread::panicking() || result == 0);
             }
@@ -111,6 +119,7 @@ impl Drop for OsIpcReceiver {
 
 impl OsIpcReceiver {
     fn from_fd(fd: c_int) -> OsIpcReceiver {
+        println!("new OsIpcReceiver fd {}", fd);
         OsIpcReceiver {
             fd: Cell::new(fd),
         }
@@ -143,6 +152,7 @@ struct SharedFileDescriptor(c_int);
 impl Drop for SharedFileDescriptor {
     fn drop(&mut self) {
         unsafe {
+            //println!("SharedFileDescriptor drop fd {}", self.0);
             let result = libc::close(self.0);
             assert!(thread::panicking() || result == 0);
         }
@@ -161,6 +171,7 @@ pub struct OsIpcSender {
 
 impl OsIpcSender {
     fn from_fd(fd: c_int) -> OsIpcSender {
+        println!("new OsIpcSender(SharedFileDescriptor) fd {}", fd);
         OsIpcSender {
             fd: Arc::new(SharedFileDescriptor(fd)),
             nosync_marker: PhantomData,
@@ -271,6 +282,8 @@ impl OsIpcSender {
                         iov_len: data_buffer.len(),
                     },
                 ];
+                println!("*** send [t:{}] (fd {}) first fragment, total size {}, first frag data len {}",
+                    gettid(), sender_fd, len, data_buffer.len());
 
                 let msghdr = msghdr {
                     msg_name: ptr::null_mut(),
@@ -302,7 +315,11 @@ impl OsIpcSender {
                            0)
             };
 
+            println!("*** send (fd {}) followup fragment, len {} result {}",
+                sender_fd, data_buffer.len(), result);
+
             if result > 0 {
+                assert!(result as usize == data_buffer.len());
                 Ok(())
             } else {
                 Err(UnixError::last())
@@ -914,6 +931,34 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
     let len = main_data_buffer.len();
     main_data_buffer.reserve_exact(total_size - len);
 
+    while main_data_buffer.len() < total_size {
+        let write_pos = main_data_buffer.len();
+        let remaining = total_size - write_pos;
+
+        let result = unsafe {
+            let result = libc::recv(dedicated_rx.fd.get(),
+                                    main_data_buffer[write_pos..].as_mut_ptr() as *mut c_void,
+                                    remaining,
+                                    0);
+            println!("*** recv [t:{}] (base fd {}, side fd {}) want {} result {}", gettid(), fd, dedicated_rx.fd.get(),
+                remaining, result);
+            main_data_buffer.set_len(write_pos + cmp::max(result, 0) as usize);
+            result
+        };
+
+        if result == 0 {
+            println!("*** libc::recv [t:{}] on side data channel (fd {}) returned 0, still expecting {} bytes ({} total)",
+                gettid(), dedicated_rx.fd.get(), remaining, total_size - len);
+        }
+
+        if result == 0 {
+            return Err(UnixError(libc::ECONNRESET))
+        } else if result < 0 {
+            return Err(UnixError::last())
+        };
+    }
+
+/*
     // Receive followup fragments directly into the main buffer.
     while main_data_buffer.len() < total_size {
         let write_pos = main_data_buffer.len();
@@ -933,6 +978,12 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
                                     main_data_buffer[write_pos..].as_mut_ptr() as *mut c_void,
                                     end_pos - write_pos,
                                     0);
+            println!("*** recv [t:{}] (base fd {}, side fd {}) want {} result {}", gettid(), fd, dedicated_rx.fd.get(),
+                end_pos - write_pos, result);
+            if result == 0 {
+                println!("*** libc::recv [t:{}] on side data channel (fd {}) returned 0, still expecting {} bytes ({} total)",
+                    gettid(), dedicated_rx.fd.get(), end_pos - write_pos, total_size - len);
+            }
             main_data_buffer.set_len(write_pos + cmp::max(result, 0) as usize);
             result
         };
@@ -943,6 +994,7 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
             return Err(UnixError::last())
         };
     }
+*/
 
     Ok((main_data_buffer, channels, shared_memory_regions))
 }

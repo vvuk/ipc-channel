@@ -914,24 +914,14 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
     let len = main_data_buffer.len();
     main_data_buffer.reserve_exact(total_size - len);
 
-    // Receive followup fragments directly into the main buffer.
     while main_data_buffer.len() < total_size {
         let write_pos = main_data_buffer.len();
-        let end_pos = cmp::min(write_pos + OsIpcSender::fragment_size(*SYSTEM_SENDBUF_SIZE),
-                               total_size);
+        let remaining = total_size - write_pos;
+
         let result = unsafe {
-            assert!(end_pos <= main_data_buffer.capacity());
-            main_data_buffer.set_len(end_pos);
-
-            // Integer underflow could make the following code unsound...
-            assert!(end_pos >= write_pos);
-
-            // Note: we always use blocking mode for followup fragments,
-            // to make sure that once we start receiving a multi-fragment message,
-            // we don't abort in the middle of it...
             let result = libc::recv(dedicated_rx.fd.get(),
                                     main_data_buffer[write_pos..].as_mut_ptr() as *mut c_void,
-                                    end_pos - write_pos,
+                                    remaining,
                                     0);
             main_data_buffer.set_len(write_pos + cmp::max(result, 0) as usize);
             result
